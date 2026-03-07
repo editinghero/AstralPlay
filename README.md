@@ -24,8 +24,8 @@ It detects episodes from `S__E__` file names, arranges them by season, and saves
 - Progress/history/thumbnail cache are saved in localStorage.
 - If browser File System Access API is available and folder is picked through it, app also writes `.astralplay.db.json` in that folder.
 - Thumbnail extraction is client-side; cached thumbnails are reused before generating missing ones.
-
-
+- Cloudflare Pages is static hosting, so it cannot write `.astralplay.db.json` back into your deployed site.
+- If you want the folder JSON database, run AstralPlay locally on your own machine.
 
 ## Run Locally
 ```bash
@@ -34,6 +34,15 @@ node server.js
 
 Open:
 `http://localhost:3333`
+
+For LAN access on your phone:
+- double-click `astralplay.cmd`
+- open the `AstralPlay LAN URL` shown in the terminal on your phone browser
+
+You can also launch it from terminal:
+```bash
+npm start
+```
 
 ## Import
 Use the `Import Media` button:
@@ -45,4 +54,3 @@ The scanner searches recursively and detects episode tokens like:
 - `S1E2`
 - `S_01_E_03`
 - `S-02-E-10`
-

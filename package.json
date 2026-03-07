@@ -5,6 +5,7 @@
   "description": "Localhost series organizer and player",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "lan": "node server.js"
   }
 }

@@ -1,11 +1,13 @@
 const http = require("http");
 const fs = require("fs");
 const fsp = require("fs/promises");
+const os = require("os");
 const path = require("path");
 const { URL } = require("url");
 const { spawn, execFile } = require("child_process");
 
 const PORT = Number(process.env.PORT || 3333);
+const HOST = process.env.HOST || "0.0.0.0";
 const PUBLIC_DIR = path.join(__dirname, "public");
 const ICON_DIR = path.join(__dirname, "icon");
 const ROOT_DB_FILE = ".astralplay.db.json";
@@ -65,6 +67,18 @@ function extractEpisodeInfo(filename) {
   const series = title.slice(0, match.index).replace(/[._-]+/g, " ").trim() || "Unknown Series";
 
   return { series, season, episode };
+}
+
+function findLanIp() {
+  const interfaces = os.networkInterfaces();
+  for (const entries of Object.values(interfaces)) {
+    for (const entry of entries || []) {
+      if (entry && entry.family === "IPv4" && !entry.internal) {
+        return entry.address;
+      }
+    }
+  }
+  return null;
 }
 
 async function walkFiles(rootDir) {
@@ -566,6 +580,16 @@ const server = http.createServer(async (req, res) => {
   await serveStatic(req, res, pathname);
 });
 
-server.listen(PORT, () => {
-  console.log(`AstralPlay running: http://localhost:${PORT}`);
+server.listen(PORT, HOST, () => {
+  const lanIp = findLanIp();
+  console.log(`AstralPlay running on http://localhost:${PORT}`);
+  if (lanIp) {
+    console.log(`AstralPlay LAN URL: http://${lanIp}:${PORT}`);
+  }
 });
+
+
+
+
+
+
