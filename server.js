@@ -135,12 +135,15 @@ async function scanLibrary(rootDir) {
       seasons.set(episodeInfo.season, []);
     }
 
-    const relativePath = path.relative(absRoot, fullPath).replaceAll("\\", "/");
+    const relativePath = canonicalRelativeFile(path.relative(absRoot, fullPath));
+    const stat = await fsp.stat(fullPath).catch(() => null);
     const hasThumb = await fileExists(thumbFilePath(absRoot, relativePath));
     seasons.get(episodeInfo.season).push({
       episode: episodeInfo.episode,
       filename,
       relativePath,
+      size: stat?.size || 0,
+      modifiedAt: stat?.mtimeMs || 0,
       streamPath: `/api/stream?root=${encodeURIComponent(absRoot)}&file=${encodeURIComponent(relativePath)}`,
       thumbPath: `/api/thumb?root=${encodeURIComponent(absRoot)}&file=${encodeURIComponent(relativePath)}`,
       hasThumb,
@@ -196,6 +199,20 @@ function normalizeDb(data) {
         ? source.thumbCache
         : {},
     lastPlayedKey: typeof source.lastPlayedKey === "string" ? source.lastPlayedKey : "",
+    libraryCache:
+      source.libraryCache && typeof source.libraryCache === "object" && !Array.isArray(source.libraryCache)
+        ? {
+            fileCount: Number(source.libraryCache.fileCount || 0),
+            cachedThumbCount: Number(source.libraryCache.cachedThumbCount || 0),
+            files:
+              source.libraryCache.files &&
+              typeof source.libraryCache.files === "object" &&
+              !Array.isArray(source.libraryCache.files)
+                ? source.libraryCache.files
+                : {},
+            updatedAt: typeof source.libraryCache.updatedAt === "string" ? source.libraryCache.updatedAt : "",
+          }
+        : { fileCount: 0, cachedThumbCount: 0, files: {}, updatedAt: "" },
   };
 }
 
@@ -256,13 +273,17 @@ function thumbDirForRoot(absRoot) {
   return path.join(absRoot, THUMB_DIR_NAME);
 }
 
+function canonicalRelativeFile(relativeFile) {
+  return path.normalize(String(relativeFile || "")).replaceAll("\\", "/");
+}
+
 function thumbFilePath(absRoot, relativeFile) {
-  const encoded = Buffer.from(relativeFile).toString("base64url");
+  const encoded = Buffer.from(canonicalRelativeFile(relativeFile)).toString("base64url");
   return path.join(thumbDirForRoot(absRoot), `${encoded}.jpg`);
 }
 
 async function writeThumbnail(absRoot, relativeFile, dataBuffer) {
-  const safeRelative = path.normalize(relativeFile);
+  const safeRelative = canonicalRelativeFile(relativeFile);
   const fullPath = path.resolve(path.join(absRoot, safeRelative));
   if (!fullPath.startsWith(absRoot)) {
     throw new Error("Invalid file path.");
@@ -274,7 +295,7 @@ async function writeThumbnail(absRoot, relativeFile, dataBuffer) {
 }
 
 async function generateThumbnail(absRoot, relativeFile, outputFile) {
-  const fullPath = path.resolve(path.join(absRoot, path.normalize(relativeFile)));
+  const fullPath = path.resolve(path.join(absRoot, canonicalRelativeFile(relativeFile)));
   if (!fullPath.startsWith(absRoot)) {
     throw new Error("Invalid file path.");
   }
@@ -313,7 +334,7 @@ async function handleThumbnail(req, res, root, relativeFile) {
     return;
   }
 
-  const safeRelative = path.normalize(relativeFile);
+  const safeRelative = canonicalRelativeFile(relativeFile);
   const outputFile = thumbFilePath(absRoot, safeRelative);
   const title = path.basename(safeRelative).replace(path.extname(safeRelative), "");
   const exists = await fsp.access(outputFile, fs.constants.F_OK).then(() => true).catch(() => false);
@@ -650,6 +671,25 @@ const server = http.createServer(async (req, res) => {
         }
         if ("lastPlayedKey" in payload) {
           db.lastPlayedKey = typeof payload.lastPlayedKey === "string" ? payload.lastPlayedKey : "";
+        }
+        if ("libraryCache" in payload) {
+          db.libraryCache =
+            payload.libraryCache && typeof payload.libraryCache === "object" && !Array.isArray(payload.libraryCache)
+              ? {
+                  fileCount: Number(payload.libraryCache.fileCount || 0),
+                  cachedThumbCount: Number(payload.libraryCache.cachedThumbCount || 0),
+                  files:
+                    payload.libraryCache.files &&
+                    typeof payload.libraryCache.files === "object" &&
+                    !Array.isArray(payload.libraryCache.files)
+                      ? payload.libraryCache.files
+                      : {},
+                  updatedAt:
+                    typeof payload.libraryCache.updatedAt === "string"
+                      ? payload.libraryCache.updatedAt
+                      : new Date().toISOString(),
+                }
+              : { fileCount: 0, cachedThumbCount: 0, files: {}, updatedAt: new Date().toISOString() };
         }
 
         await writeRootDb(absRoot, db);

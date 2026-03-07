@@ -83,6 +83,20 @@ function normalizeDb(data) {
         ? source.thumbCache
         : {},
     lastPlayedKey: typeof source.lastPlayedKey === "string" ? source.lastPlayedKey : "",
+    libraryCache:
+      source.libraryCache && typeof source.libraryCache === "object" && !Array.isArray(source.libraryCache)
+        ? {
+            fileCount: Number(source.libraryCache.fileCount || 0),
+            cachedThumbCount: Number(source.libraryCache.cachedThumbCount || 0),
+            files:
+              source.libraryCache.files &&
+              typeof source.libraryCache.files === "object" &&
+              !Array.isArray(source.libraryCache.files)
+                ? source.libraryCache.files
+                : {},
+            updatedAt: typeof source.libraryCache.updatedAt === "string" ? source.libraryCache.updatedAt : "",
+          }
+        : { fileCount: 0, cachedThumbCount: 0, files: {}, updatedAt: "" },
   };
 }
 
@@ -163,6 +177,25 @@ async function writeServerDb(patch) {
   }
 }
 
+function makeServerFileSignature(ep) {
+  return `${ep.relPath}::${Number(ep.size || 0)}::${Number(ep.modifiedAt || 0)}`;
+}
+
+function buildServerLibraryCache(episodes) {
+  const files = {};
+  let cachedThumbCount = 0;
+  for (const ep of episodes) {
+    files[ep.relPath] = makeServerFileSignature(ep);
+    if (ep.hasThumb) cachedThumbCount += 1;
+  }
+  return {
+    fileCount: episodes.length,
+    cachedThumbCount,
+    files,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
 async function writeServerProgress(ep, progress, useBeacon = false) {
   if (!serverRoot || !ep || !progress) return;
   const payload = {
@@ -234,6 +267,7 @@ async function writeFolderDbIfPossible() {
           history: localDb.history,
           thumbCache: localDb.thumbCache,
           lastPlayedKey: localDb.lastPlayedKey || "",
+          libraryCache: localDb.libraryCache,
           updatedAt: Date.now(),
         },
         null,
@@ -303,6 +337,8 @@ function flattenServerLibrary(library) {
           series: series.name,
           season: Number(season.season),
           episode: Number(episode.episode),
+          size: Number(episode.size || 0),
+          modifiedAt: Number(episode.modifiedAt || 0),
           thumbUrl: episode.hasThumb ? episode.thumbPath || "" : "",
           serverThumbPath: episode.thumbPath || "",
           hasThumb: Boolean(episode.hasThumb),
@@ -694,18 +730,21 @@ async function importFileMetas(metas) {
   setStatus("Library ready.");
 }
 
-async function processServerThumbnails(mode, singleThumb = "") {
+async function processServerThumbnails(mode, singleThumb = "", targetsOverride = null) {
   if (mode === "none") {
     allEpisodes.forEach((ep) => {
-      ep.thumbUrl = "";
+      ep.thumbUrl = ep.hasThumb ? ep.serverThumbPath : placeholderThumb(ep);
     });
     renderRows();
-    setStatus("Thumbnails disabled for this local import.");
+    setStatus("Using cached thumbnails only.");
     return;
   }
 
-  const targets =
-    mode === "single" ? allEpisodes : allEpisodes.filter((ep) => !ep.hasThumb && ep.streamUrl);
+  const targets = Array.isArray(targetsOverride)
+    ? targetsOverride
+    : mode === "single"
+      ? allEpisodes
+      : allEpisodes.filter((ep) => !ep.hasThumb && ep.streamUrl);
 
   if (!targets.length) {
     allEpisodes.forEach((ep) => {
@@ -747,6 +786,16 @@ async function processServerThumbnails(mode, singleThumb = "") {
     saved ? `Saved ${saved} thumbnails to .astralplay_thumbs.` : "No thumbnails could be generated for this folder.",
     saved === 0
   );
+
+  if (serverRoot) {
+    try {
+      localDb.libraryCache = buildServerLibraryCache(allEpisodes);
+      persistLocalDb();
+      await writeServerDb({ libraryCache: localDb.libraryCache });
+    } catch (error) {
+      console.error("Failed to sync library cache to server.", error);
+    }
+  }
 }
 
 async function importServerLibrary(root) {
@@ -769,22 +818,68 @@ async function importServerLibrary(root) {
     return setStatus("No S__E__ files found in selected folder.", true);
   }
 
+  allEpisodes.forEach((ep) => {
+    ep.thumbUrl = ep.hasThumb ? ep.serverThumbPath : placeholderThumb(ep);
+  });
+  libraryInfoEl.textContent = `${allEpisodes.length} episodes`;
+  renderRows();
+
+  const previousFiles = localDb.libraryCache?.files || {};
+  const currentCache = buildServerLibraryCache(allEpisodes);
+  const addedEpisodes = allEpisodes.filter((ep) => {
+    const previousSignature = previousFiles[ep.relPath];
+    return previousSignature !== makeServerFileSignature(ep);
+  });
+  const missingThumbs = allEpisodes.filter((ep) => !ep.hasThumb && ep.streamUrl);
+  const targets = addedEpisodes.filter((ep) => !ep.hasThumb && ep.streamUrl);
+  const unchangedLibrary =
+    currentCache.fileCount === Number(localDb.libraryCache?.fileCount || 0) &&
+    addedEpisodes.length === 0 &&
+    missingThumbs.length === 0;
+
+  if (unchangedLibrary) {
+    localDb.libraryCache = currentCache;
+    persistLocalDb();
+    return setStatus(
+      `Loaded folder DB cache. ${currentCache.fileCount} files, ${currentCache.cachedThumbCount} thumbnails, history restored.`
+    );
+  }
+
+  if (!missingThumbs.length) {
+    localDb.libraryCache = currentCache;
+    persistLocalDb();
+    await writeServerDb({ libraryCache: currentCache });
+    return setStatus(
+      `Loaded folder cache. ${currentCache.fileCount} files scanned, no new thumbnails needed, history restored.`
+    );
+  }
+
   const mode = await askThumbMode();
   let singleThumb = "";
   if (mode === "single") {
     singleThumb = await askSingleImage();
     if (!singleThumb) {
-      allEpisodes.forEach((ep) => {
-        ep.thumbUrl = ep.hasThumb ? ep.serverThumbPath : "";
-      });
-      libraryInfoEl.textContent = `${allEpisodes.length} episodes`;
-      renderRows();
       return setStatus("No image selected for thumbnails.", true);
     }
   }
 
-  libraryInfoEl.textContent = `${allEpisodes.length} episodes`;
-  renderRows();
+  if (mode === "generate" && targets.length === 0) {
+    localDb.libraryCache = currentCache;
+    persistLocalDb();
+    await writeServerDb({ libraryCache: currentCache });
+    return setStatus(
+      `No new files to cache. Loaded existing thumbnails from .astralplay_thumbs for ${currentCache.cachedThumbCount}/${currentCache.fileCount} files.`
+    );
+  }
+
+  if (mode === "generate" && targets.length > 0) {
+    await processServerThumbnails(mode, singleThumb, targets);
+    localDb.libraryCache = buildServerLibraryCache(allEpisodes);
+    persistLocalDb();
+    await writeServerDb({ libraryCache: localDb.libraryCache });
+    return;
+  }
+
   await processServerThumbnails(mode, singleThumb);
 }
 
