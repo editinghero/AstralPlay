@@ -1,0 +1,10 @@
+{
+  "name": "astralplay",
+  "version": "1.2.0",
+  "private": true,
+  "description": "Localhost series organizer and player",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  }
+}

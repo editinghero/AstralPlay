@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AstralPlay</title>
+    <link rel="icon" href="/favicon.ico" sizes="any" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/icon/favicon-32x32.png" />
+    <link rel="icon" type="image/png" sizes="16x16" href="/icon/favicon-16x16.png" />
+    <link rel="apple-touch-icon" href="/icon/apple-touch-icon.png" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="layout">
+      <aside class="sidebar">
+        <h1>AstralPlay</h1>
+        <button id="navLibrary" class="side-btn active">Library</button>
+        <button id="navContinue" class="side-btn">Continue</button>
+        <button id="navHistory" class="side-btn">History</button>
+        <button id="importBtn" class="side-btn primary">Import Media</button>
+        <input id="folderInput" type="file" webkitdirectory directory multiple hidden />
+        <input id="filesInput" type="file" accept="video/*" multiple hidden />
+        <input id="singleThumbInput" type="file" accept="image/*" hidden />
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <button id="menuBtn" class="menu-btn">Menu</button>
+          <div id="status" class="status">Import media to start.</div>
+          <button id="toggleAllRowsBtn" class="ctrl-btn">Hide All Seasons</button>
+          <button id="clearHistoryBtn" class="ctrl-btn hidden-action">Clear History</button>
+          <div id="libraryInfo" class="library-info"></div>
+        </header>
+        <section id="rows" class="rows"></section>
+      </main>
+    </div>
+
+    <div id="importChoiceModal" class="dialog hidden">
+      <div class="dialog-card">
+        <h2>Import Media</h2>
+        <p>Choose how you want to add episodes.</p>
+        <div class="dialog-actions">
+          <button id="pickFolderChoiceBtn" class="ctrl-btn large">Open Folder</button>
+          <button id="pickFilesChoiceBtn" class="ctrl-btn large">Open Files</button>
+          <button id="closeImportChoiceBtn" class="ctrl-btn large">Cancel</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="thumbChoiceModal" class="dialog hidden">
+      <div class="dialog-card">
+        <h2>Thumbnail Mode</h2>
+        <p>Choose how thumbnails should be handled.</p>
+        <div class="dialog-actions">
+          <button id="modeSingle" class="ctrl-btn large">Use one uploaded image for all</button>
+          <button id="modeNone" class="ctrl-btn large">No thumbnails</button>
+          <button id="modeGenerate" class="ctrl-btn large">Generate thumbnails</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="playerModal" class="player-modal hidden">
+      <div id="playerBackdrop" class="player-backdrop"></div>
+      <div class="player-container">
+        <section class="player-left">
+          <div id="videoWrap" class="video-wrap">
+            <video id="video" preload="metadata"></video>
+            <div id="controls" class="controls visible">
+              <div class="controls-top">
+                <div id="nowPlaying">No episode selected</div>
+                <div class="player-top-actions">
+                  <button id="queueToggleBtn" class="ctrl-btn large mobile-queue-btn">Up Next</button>
+                  <button id="closePlayerBtn" class="ctrl-btn large">Close</button>
+                </div>
+              </div>
+              <div class="controls-bottom">
+                <input id="seek" type="range" min="0" max="100" step="0.1" value="0" />
+                <div class="control-row">
+                  <button id="playPauseBtn" class="ctrl-btn large">Play</button>
+                  <button id="nextBtn" class="ctrl-btn large">Next</button>
+                  <button id="autoNextBtn" class="ctrl-btn large">Auto Next: On</button>
+                  <span id="timeText">00:00 / 00:00</span>
+                  <label class="volume-wrap">Volume <input id="volume" type="range" min="0" max="1" step="0.05" value="1" /></label>
+                  <div class="speed-wrap">
+                    <button id="speedBtn" class="ctrl-btn large">1x</button>
+                    <div id="speedMenu" class="speed-menu hidden"></div>
+                  </div>
+                  <button id="fullscreenBtn" class="ctrl-btn large">Fullscreen</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+        <aside class="player-right">
+          <h3>Up Next</h3>
+          <div id="queueList" class="queue-list"></div>
+        </aside>
+      </div>
+    </div>
+
+    <script src="/app.js"></script>
+  </body>
+  </html>
