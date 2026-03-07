@@ -66,29 +66,147 @@ let seekActive = false;
 let saveTimer = null;
 let controlsHideTimer = null;
 let rootHandle = null;
+let serverRoot = "";
+let serverApiReady = false;
+let serverApiChecked = false;
 let allRowsCollapsed = false;
 let queueOpen = false;
 const rowPageState = new Map();
 
+function normalizeDb(data) {
+  const source = data && typeof data === "object" ? data : {};
+  return {
+    progress: source.progress && typeof source.progress === "object" && !Array.isArray(source.progress) ? source.progress : {},
+    history: Array.isArray(source.history) ? source.history : [],
+    thumbCache:
+      source.thumbCache && typeof source.thumbCache === "object" && !Array.isArray(source.thumbCache)
+        ? source.thumbCache
+        : {},
+    lastPlayedKey: typeof source.lastPlayedKey === "string" ? source.lastPlayedKey : "",
+  };
+}
+
 function loadDb() {
   try {
     const raw = localStorage.getItem(DB_KEY);
-    const parsed = raw ? JSON.parse(raw) : null;
-    if (parsed && typeof parsed === "object") {
-      return {
-        progress: parsed.progress && typeof parsed.progress === "object" ? parsed.progress : {},
-        history: Array.isArray(parsed.history) ? parsed.history : [],
-        thumbCache: parsed.thumbCache && typeof parsed.thumbCache === "object" ? parsed.thumbCache : {},
-        lastPlayedKey: typeof parsed.lastPlayedKey === "string" ? parsed.lastPlayedKey : "",
-      };
-    }
+    return normalizeDb(raw ? JSON.parse(raw) : null);
   } catch {}
-  return { progress: {}, history: [], thumbCache: {}, lastPlayedKey: "" };
+  return normalizeDb({});
+}
+
+function persistLocalDb() {
+  localStorage.setItem(DB_KEY, JSON.stringify(localDb));
 }
 
 function persistDb() {
-  localStorage.setItem(DB_KEY, JSON.stringify(localDb));
+  persistLocalDb();
   writeFolderDbIfPossible();
+}
+
+async function fetchJson(url, options = {}) {
+  const response = await fetch(url, {
+    cache: "no-store",
+    ...options,
+  });
+  const text = await response.text();
+  let data = {};
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = { error: text };
+    }
+  }
+  if (!response.ok) {
+    throw new Error(data.error || `Request failed (${response.status})`);
+  }
+  return data;
+}
+
+async function ensureServerApi() {
+  if (serverApiChecked) return serverApiReady;
+  serverApiChecked = true;
+  try {
+    const data = await fetchJson("/api/health");
+    serverApiReady = Boolean(data.ok);
+  } catch {
+    serverApiReady = false;
+  }
+  return serverApiReady;
+}
+
+function isLoopbackHost() {
+  const host = String(window.location.hostname || "").toLowerCase();
+  return host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]";
+}
+
+function withCacheBust(url, token = Date.now()) {
+  if (!url) return "";
+  return `${url}${url.includes("?") ? "&" : "?"}v=${encodeURIComponent(String(token))}`;
+}
+
+async function readServerDb(root) {
+  const data = await fetchJson(`/api/db?root=${encodeURIComponent(root)}`);
+  return normalizeDb(data);
+}
+
+async function writeServerDb(patch) {
+  if (!serverRoot) return;
+  try {
+    await fetchJson("/api/db", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ root: serverRoot, ...patch }),
+    });
+  } catch (error) {
+    console.error("Failed to sync DB to server.", error);
+  }
+}
+
+async function writeServerProgress(ep, progress, useBeacon = false) {
+  if (!serverRoot || !ep || !progress) return;
+  const payload = {
+    root: serverRoot,
+    key: ep.key,
+    currentTime: Number(progress.currentTime || 0),
+    duration: Number(progress.duration || 0),
+    speed: Number(progress.speed || 1),
+    volume: Number(progress.volume || 1),
+    lastPlayedKey: localDb.lastPlayedKey || ep.key,
+  };
+
+  if (useBeacon && navigator.sendBeacon) {
+    try {
+      const ok = navigator.sendBeacon("/api/progress", new Blob([JSON.stringify(payload)], { type: "application/json" }));
+      if (ok) return;
+    } catch {}
+  }
+
+  try {
+    await fetchJson("/api/progress", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+  } catch (error) {
+    console.error("Failed to sync progress to server.", error);
+  }
+}
+
+async function uploadServerThumb(ep, dataUrl) {
+  const data = await fetchJson("/api/thumb", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      root: serverRoot,
+      file: ep.relPath,
+      dataUrl,
+    }),
+  });
+
+  ep.hasThumb = true;
+  ep.serverThumbPath = data.thumbPath || ep.serverThumbPath;
+  ep.thumbUrl = withCacheBust(ep.serverThumbPath, `${Date.now()}-${Math.random()}`);
 }
 
 async function readFolderDbIfPossible() {
@@ -97,11 +215,7 @@ async function readFolderDbIfPossible() {
     try {
       const fileHandle = await rootHandle.getFileHandle(name);
       const text = await (await fileHandle.getFile()).text();
-      const parsed = JSON.parse(text);
-      if (parsed.progress && typeof parsed.progress === "object") localDb.progress = parsed.progress;
-      if (Array.isArray(parsed.history)) localDb.history = parsed.history;
-      if (parsed.thumbCache && typeof parsed.thumbCache === "object") localDb.thumbCache = parsed.thumbCache;
-      if (typeof parsed.lastPlayedKey === "string") localDb.lastPlayedKey = parsed.lastPlayedKey;
+      localDb = normalizeDb(JSON.parse(text));
       persistDb();
       return;
     } catch {}
@@ -172,7 +286,33 @@ function parseEpisode(meta) {
     episode,
     thumbUrl: "",
     objectUrl: "",
+    streamUrl: "",
   };
+}
+
+function flattenServerLibrary(library) {
+  const items = [];
+  for (const series of library.series || []) {
+    for (const season of series.seasons || []) {
+      for (const episode of season.episodes || []) {
+        items.push({
+          key: episode.key,
+          file: null,
+          relPath: episode.relativePath,
+          filename: episode.filename,
+          series: series.name,
+          season: Number(season.season),
+          episode: Number(episode.episode),
+          thumbUrl: episode.hasThumb ? episode.thumbPath || "" : "",
+          serverThumbPath: episode.thumbPath || "",
+          hasThumb: Boolean(episode.hasThumb),
+          objectUrl: "",
+          streamUrl: episode.streamPath || "",
+        });
+      }
+    }
+  }
+  return items;
 }
 
 function formatTime(v) {
@@ -221,24 +361,44 @@ function askSingleImage() {
     singleThumbInput.onchange = () => {
       const file = singleThumbInput.files?.[0];
       if (!file) return resolve("");
-      const reader = new FileReader();
-      reader.onload = () => resolve(String(reader.result || ""));
-      reader.onerror = () => resolve("");
-      reader.readAsDataURL(file);
+      const img = new Image();
+      const url = URL.createObjectURL(file);
+      img.onload = () => {
+        const canvas = document.createElement("canvas");
+        canvas.width = img.naturalWidth || img.width || 640;
+        canvas.height = img.naturalHeight || img.height || 360;
+        const ctx = canvas.getContext("2d");
+        URL.revokeObjectURL(url);
+        if (!ctx) return resolve("");
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        resolve(canvas.toDataURL("image/jpeg", 0.85));
+      };
+      img.onerror = () => {
+        URL.revokeObjectURL(url);
+        resolve("");
+      };
+      img.src = url;
     };
     singleThumbInput.click();
   });
 }
 
-async function buildThumb(file) {
+async function buildThumb(source) {
   return new Promise((resolve) => {
     const v = document.createElement("video");
-    const url = URL.createObjectURL(file);
-    v.src = url;
+    let objectUrl = "";
+    if (typeof source === "string") {
+      v.src = source;
+      v.crossOrigin = "anonymous";
+    } else {
+      objectUrl = URL.createObjectURL(source);
+      v.src = objectUrl;
+    }
     v.preload = "metadata";
     v.muted = true;
+    v.playsInline = true;
     const cleanup = () => {
-      URL.revokeObjectURL(url);
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
       v.remove();
     };
     const fail = () => {
@@ -473,6 +633,7 @@ function refreshProgressUi() {
 
 async function importFileMetas(metas) {
   if (!metas.length) return setStatus("No files selected.", true);
+  await closePlayer();
   const mode = await askThumbMode();
   let singleThumb = "";
   if (mode === "single") {
@@ -533,6 +694,100 @@ async function importFileMetas(metas) {
   setStatus("Library ready.");
 }
 
+async function processServerThumbnails(mode, singleThumb = "") {
+  if (mode === "none") {
+    allEpisodes.forEach((ep) => {
+      ep.thumbUrl = "";
+    });
+    renderRows();
+    setStatus("Thumbnails disabled for this local import.");
+    return;
+  }
+
+  const targets =
+    mode === "single" ? allEpisodes : allEpisodes.filter((ep) => !ep.hasThumb && ep.streamUrl);
+
+  if (!targets.length) {
+    allEpisodes.forEach((ep) => {
+      ep.thumbUrl = ep.hasThumb ? ep.serverThumbPath : ep.thumbUrl;
+    });
+    renderRows();
+    setStatus("Library ready from disk cache.");
+    return;
+  }
+
+  const batchSize = 4;
+  let completed = 0;
+  let saved = 0;
+  const total = targets.length;
+
+  while (completed < total) {
+    const slice = targets.slice(completed, completed + batchSize);
+    const results = await Promise.all(
+      slice.map(async (ep) => {
+        try {
+          const dataUrl = mode === "single" ? singleThumb : await buildThumb(ep.streamUrl);
+          if (!dataUrl) return false;
+          await uploadServerThumb(ep, dataUrl);
+          return true;
+        } catch (error) {
+          console.error(`Failed to save thumbnail for ${ep.filename}.`, error);
+          return false;
+        }
+      })
+    );
+
+    saved += results.filter(Boolean).length;
+    completed += slice.length;
+    renderRows();
+    setStatus(`Saved ${saved}/${total} thumbnails to .astralplay_thumbs...`);
+  }
+
+  setStatus(
+    saved ? `Saved ${saved} thumbnails to .astralplay_thumbs.` : "No thumbnails could be generated for this folder.",
+    saved === 0
+  );
+}
+
+async function importServerLibrary(root) {
+  await closePlayer();
+  setStatus("Scanning folder on local server...");
+  const [library, db] = await Promise.all([
+    fetchJson(`/api/library?root=${encodeURIComponent(root)}`),
+    readServerDb(root),
+  ]);
+
+  serverRoot = root;
+  rootHandle = null;
+  localDb = db;
+  persistLocalDb();
+
+  allEpisodes = flattenServerLibrary(library);
+  if (!allEpisodes.length) {
+    rowsEl.innerHTML = "";
+    libraryInfoEl.textContent = "0 episodes";
+    return setStatus("No S__E__ files found in selected folder.", true);
+  }
+
+  const mode = await askThumbMode();
+  let singleThumb = "";
+  if (mode === "single") {
+    singleThumb = await askSingleImage();
+    if (!singleThumb) {
+      allEpisodes.forEach((ep) => {
+        ep.thumbUrl = ep.hasThumb ? ep.serverThumbPath : "";
+      });
+      libraryInfoEl.textContent = `${allEpisodes.length} episodes`;
+      renderRows();
+      return setStatus("No image selected for thumbnails.", true);
+    }
+  }
+
+  libraryInfoEl.textContent = `${allEpisodes.length} episodes`;
+  renderRows();
+  await processServerThumbnails(mode, singleThumb);
+}
+
 function openImportChoice() {
   importChoiceModal.classList.remove("hidden");
 }
@@ -556,9 +811,32 @@ async function collectFromDirectoryHandle(handle, prefix = "") {
 }
 
 async function pickFolder() {
+  if (isLoopbackHost()) {
+    const serverAvailable = await ensureServerApi();
+    if (!serverAvailable) {
+      setStatus("Localhost mode requires the Node server APIs. Run this app with node server.js.", true);
+      return;
+    }
+
+    try {
+      setStatus("Opening folder on local server...");
+      const selection = await fetchJson("/api/pick-folder", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+      await importServerLibrary(selection.root);
+      return;
+    } catch (error) {
+      setStatus(error.message || "Failed to open folder on local server.", true);
+      return;
+    }
+  }
+
   if (window.showDirectoryPicker) {
     try {
       setStatus("Opening folder...");
+      serverRoot = "";
       rootHandle = await window.showDirectoryPicker();
       await readFolderDbIfPossible();
       const files = await collectFromDirectoryHandle(rootHandle);
@@ -571,6 +849,7 @@ async function pickFolder() {
 }
 
 async function handleFolderInput(files) {
+  serverRoot = "";
   rootHandle = null;
   await importFileMetas(
     Array.from(files || []).map((file) => ({
@@ -584,6 +863,7 @@ async function handleFolderInput(files) {
 }
 
 async function handleFilesInput(files) {
+  serverRoot = "";
   rootHandle = null;
   await importFileMetas(
     Array.from(files || []).map((file) => ({
@@ -594,6 +874,9 @@ async function handleFilesInput(files) {
       file,
     }))
   );
+  if (isLoopbackHost()) {
+    setStatus("Open Files uses browser cache only. Use Open Folder on localhost for db.json and .astralplay_thumbs.");
+  }
 }
 
 function addHistory(ep) {
@@ -601,19 +884,29 @@ function addHistory(ep) {
   localDb.history.push({ key: ep.key, at: Date.now() });
   if (localDb.history.length > 2000) localDb.history = localDb.history.slice(-2000);
   persistDb();
+  if (serverRoot) {
+    void writeServerDb({
+      history: localDb.history,
+      lastPlayedKey: localDb.lastPlayedKey || ep.key,
+    });
+  }
 }
 
-function saveCurrentProgress() {
+function saveCurrentProgress(options = {}) {
   if (!currentEpisode) return;
   localDb.lastPlayedKey = currentEpisode.key;
-  localDb.progress[currentEpisode.key] = {
+  const progress = {
     currentTime: Number(videoEl.currentTime || 0),
     duration: Number(videoEl.duration || 0),
     volume: Number(videoEl.volume || 1),
     speed: Number(videoEl.playbackRate || 1),
     updatedAt: Date.now(),
   };
+  localDb.progress[currentEpisode.key] = progress;
   persistDb();
+  if (serverRoot) {
+    void writeServerProgress(currentEpisode, progress, options.useBeacon === true);
+  }
 }
 
 function queueSave() {
@@ -719,14 +1012,19 @@ async function openEpisode(ep) {
   currentSeasonQueue = seasonQueueFor(ep);
   nowPlayingEl.textContent = `${ep.series} • ${seasonLabel(ep.season)} ${episodeLabel(ep.episode)} • ${ep.filename}`;
 
-  if (ep.objectUrl) URL.revokeObjectURL(ep.objectUrl);
-  ep.objectUrl = URL.createObjectURL(ep.file);
-  videoEl.src = ep.objectUrl;
+  if (ep.file) {
+    if (ep.objectUrl) URL.revokeObjectURL(ep.objectUrl);
+    ep.objectUrl = URL.createObjectURL(ep.file);
+    videoEl.src = ep.objectUrl;
+  } else {
+    ep.objectUrl = "";
+    videoEl.src = ep.streamUrl;
+  }
 
   const p = progressOf(ep);
   videoEl.volume = p?.volume ?? 1;
   volumeEl.value = String(videoEl.volume);
-  videoEl.playbackRate = p?.speed ?? 1;
+  videoEl.playbackRate = p?.speed ?? p?.playbackRate ?? 1;
   speedBtn.textContent = `${videoEl.playbackRate}x`;
 
   setQueueOpen(false);
@@ -817,6 +1115,9 @@ clearHistoryBtn.addEventListener("click", () => {
   if (!window.confirm("Clear playback history?")) return;
   localDb.history = [];
   persistDb();
+  if (serverRoot) {
+    void writeServerDb({ history: [] });
+  }
   renderRows();
   setStatus("History cleared.");
 });
@@ -915,7 +1216,7 @@ videoEl.addEventListener("ended", async () => {
   if (autoNext) await playNext();
 });
 
-window.addEventListener("beforeunload", saveCurrentProgress);
+window.addEventListener("beforeunload", () => saveCurrentProgress({ useBeacon: true }));
 
 document.addEventListener("keydown", (e) => {
   if (playerModal.classList.contains("hidden")) return;

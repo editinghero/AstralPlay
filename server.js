@@ -51,6 +51,10 @@ function mimeType(filePath) {
   return "application/octet-stream";
 }
 
+async function fileExists(targetPath) {
+  return fsp.access(targetPath, fs.constants.F_OK).then(() => true).catch(() => false);
+}
+
 function safeResolveMediaPath(rawPath) {
   if (!rawPath) return null;
   const normalized = path.normalize(rawPath);
@@ -132,12 +136,14 @@ async function scanLibrary(rootDir) {
     }
 
     const relativePath = path.relative(absRoot, fullPath).replaceAll("\\", "/");
+    const hasThumb = await fileExists(thumbFilePath(absRoot, relativePath));
     seasons.get(episodeInfo.season).push({
       episode: episodeInfo.episode,
       filename,
       relativePath,
       streamPath: `/api/stream?root=${encodeURIComponent(absRoot)}&file=${encodeURIComponent(relativePath)}`,
       thumbPath: `/api/thumb?root=${encodeURIComponent(absRoot)}&file=${encodeURIComponent(relativePath)}`,
+      hasThumb,
       key: `${absRoot}::${relativePath}`,
     });
   }
@@ -179,6 +185,20 @@ function dbPathForRoot(absRoot) {
   return path.join(absRoot, ROOT_DB_FILE);
 }
 
+function normalizeDb(data) {
+  const source = data && typeof data === "object" ? data : {};
+  return {
+    progress:
+      source.progress && typeof source.progress === "object" && !Array.isArray(source.progress) ? source.progress : {},
+    history: Array.isArray(source.history) ? source.history : [],
+    thumbCache:
+      source.thumbCache && typeof source.thumbCache === "object" && !Array.isArray(source.thumbCache)
+        ? source.thumbCache
+        : {},
+    lastPlayedKey: typeof source.lastPlayedKey === "string" ? source.lastPlayedKey : "",
+  };
+}
+
 async function migrateRootStorage(absRoot) {
   const dbPath = path.join(absRoot, ROOT_DB_FILE);
   const legacyDbPath = path.join(absRoot, LEGACY_ROOT_DB_FILE);
@@ -212,27 +232,24 @@ async function readRootDb(absRoot) {
   const dbPath = dbPathForRoot(absRoot);
   const exists = await fsp.access(dbPath, fs.constants.F_OK).then(() => true).catch(() => false);
   if (!exists) {
-    const empty = { progress: {} };
+    const empty = normalizeDb({});
     await fsp.writeFile(dbPath, JSON.stringify(empty, null, 2), "utf8");
     return empty;
   }
 
   const raw = await fsp.readFile(dbPath, "utf8");
   try {
-    const parsed = JSON.parse(raw);
-    if (parsed && typeof parsed === "object") {
-      return {
-        progress: parsed.progress && typeof parsed.progress === "object" ? parsed.progress : {},
-      };
-    }
+    return normalizeDb(JSON.parse(raw));
   } catch {}
-  return { progress: {} };
+  return normalizeDb({});
 }
 
 async function writeRootDb(absRoot, data) {
   await migrateRootStorage(absRoot);
   const dbPath = dbPathForRoot(absRoot);
-  await fsp.writeFile(dbPath, JSON.stringify(data, null, 2), "utf8");
+  const normalized = normalizeDb(data);
+  normalized.updatedAt = new Date().toISOString();
+  await fsp.writeFile(dbPath, JSON.stringify(normalized, null, 2), "utf8");
 }
 
 function thumbDirForRoot(absRoot) {
@@ -242,6 +259,18 @@ function thumbDirForRoot(absRoot) {
 function thumbFilePath(absRoot, relativeFile) {
   const encoded = Buffer.from(relativeFile).toString("base64url");
   return path.join(thumbDirForRoot(absRoot), `${encoded}.jpg`);
+}
+
+async function writeThumbnail(absRoot, relativeFile, dataBuffer) {
+  const safeRelative = path.normalize(relativeFile);
+  const fullPath = path.resolve(path.join(absRoot, safeRelative));
+  if (!fullPath.startsWith(absRoot)) {
+    throw new Error("Invalid file path.");
+  }
+
+  const outputFile = thumbFilePath(absRoot, safeRelative);
+  await fsp.mkdir(path.dirname(outputFile), { recursive: true });
+  await fsp.writeFile(outputFile, dataBuffer);
 }
 
 async function generateThumbnail(absRoot, relativeFile, outputFile) {
@@ -328,6 +357,41 @@ async function handleThumbnail(req, res, root, relativeFile) {
     });
     res.end(body);
   }
+}
+
+async function handleThumbnailUpload(req, res) {
+  let body = "";
+  req.on("data", (chunk) => {
+    body += chunk;
+    if (body.length > 10 * 1024 * 1024) req.destroy();
+  });
+
+  req.on("end", async () => {
+    try {
+      const payload = JSON.parse(body || "{}");
+      if (!payload || typeof payload !== "object" || !payload.root || !payload.file || !payload.dataUrl) {
+        sendJson(res, 400, { error: "Invalid payload." });
+        return;
+      }
+
+      const match = /^data:image\/jpeg;base64,(.+)$/i.exec(String(payload.dataUrl));
+      if (!match) {
+        sendJson(res, 400, { error: "Only JPEG thumbnail uploads are supported." });
+        return;
+      }
+
+      const absRoot = await validateRootDir(payload.root);
+      const buffer = Buffer.from(match[1], "base64");
+      await writeThumbnail(absRoot, payload.file, buffer);
+      sendJson(res, 200, { ok: true, thumbPath: `/api/thumb?root=${encodeURIComponent(absRoot)}&file=${encodeURIComponent(payload.file)}` });
+    } catch (error) {
+      if (error instanceof SyntaxError) {
+        sendJson(res, 400, { error: "Invalid JSON body." });
+        return;
+      }
+      sendJson(res, 400, { error: error.message || "Failed to save thumbnail." });
+    }
+  });
 }
 
 function openFolder(absPath) {
@@ -520,10 +584,13 @@ const server = http.createServer(async (req, res) => {
         db.progress[payload.key] = {
           currentTime: Number(payload.currentTime || 0),
           duration: Number(payload.duration || 0),
-          playbackRate: Number(payload.playbackRate || 1),
+          speed: Number(payload.speed ?? payload.playbackRate ?? 1),
           volume: Number(payload.volume || 1),
           updatedAt: new Date().toISOString(),
         };
+        if (typeof payload.lastPlayedKey === "string") {
+          db.lastPlayedKey = payload.lastPlayedKey;
+        }
         await writeRootDb(absRoot, db);
         sendJson(res, 200, { ok: true });
       } catch (error) {
@@ -537,6 +604,67 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (pathname === "/api/db" && req.method === "GET") {
+    const root = searchParams.get("root");
+    try {
+      const absRoot = await validateRootDir(root);
+      const db = await readRootDb(absRoot);
+      sendJson(res, 200, db);
+    } catch (error) {
+      sendJson(res, 400, { error: error.message || "Failed to read DB." });
+    }
+    return;
+  }
+
+  if (pathname === "/api/db" && req.method === "POST") {
+    let body = "";
+    req.on("data", (chunk) => {
+      body += chunk;
+      if (body.length > 10 * 1024 * 1024) req.destroy();
+    });
+    req.on("end", async () => {
+      try {
+        const payload = JSON.parse(body || "{}");
+        if (!payload || typeof payload !== "object" || !payload.root) {
+          sendJson(res, 400, { error: "Invalid payload." });
+          return;
+        }
+
+        const absRoot = await validateRootDir(payload.root);
+        const db = await readRootDb(absRoot);
+
+        if ("progress" in payload) {
+          db.progress =
+            payload.progress && typeof payload.progress === "object" && !Array.isArray(payload.progress)
+              ? payload.progress
+              : {};
+        }
+        if ("history" in payload) {
+          db.history = Array.isArray(payload.history) ? payload.history : [];
+        }
+        if ("thumbCache" in payload) {
+          db.thumbCache =
+            payload.thumbCache && typeof payload.thumbCache === "object" && !Array.isArray(payload.thumbCache)
+              ? payload.thumbCache
+              : {};
+        }
+        if ("lastPlayedKey" in payload) {
+          db.lastPlayedKey = typeof payload.lastPlayedKey === "string" ? payload.lastPlayedKey : "";
+        }
+
+        await writeRootDb(absRoot, db);
+        sendJson(res, 200, { ok: true });
+      } catch (error) {
+        if (error instanceof SyntaxError) {
+          sendJson(res, 400, { error: "Invalid JSON body." });
+          return;
+        }
+        sendJson(res, 400, { error: error.message || "Failed to save DB." });
+      }
+    });
+    return;
+  }
+
   if (pathname === "/api/stream" && req.method === "GET") {
     await handleStream(req, res, searchParams.get("root"), searchParams.get("file"));
     return;
@@ -544,6 +672,11 @@ const server = http.createServer(async (req, res) => {
 
   if (pathname === "/api/thumb" && req.method === "GET") {
     await handleThumbnail(req, res, searchParams.get("root"), searchParams.get("file"));
+    return;
+  }
+
+  if (pathname === "/api/thumb" && req.method === "POST") {
+    await handleThumbnailUpload(req, res);
     return;
   }
 
@@ -574,6 +707,11 @@ const server = http.createServer(async (req, res) => {
     } catch (error) {
       sendJson(res, 400, { error: error.message || "Failed to pick folder." });
     }
+    return;
+  }
+
+  if (pathname === "/api/health" && req.method === "GET") {
+    sendJson(res, 200, { ok: true });
     return;
   }
 

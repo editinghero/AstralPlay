@@ -22,7 +22,10 @@ It detects episodes from `S__E__` file names, arranges them by season, and saves
 - Browser playback support depends on codec/container. `mp4` is safest.
 - Many `.mkv` files may not play in browser even though they are detected.
 - Progress/history/thumbnail cache are saved in localStorage.
-- If browser File System Access API is available and folder is picked through it, app also writes `.astralplay.db.json` in that folder.
+- When running the local Node server, `Open Folder` uses the server APIs and writes `.astralplay.db.json` inside the selected media folder.
+- On `http://localhost:3333`, `Open Folder` also writes cached thumbnails into `.astralplay_thumbs` in that same media folder.
+- `Open Files` stays browser-only and does not write folder DB/thumb files.
+- If the app falls back to browser folder access, it can also write `.astralplay.db.json` directly through the File System Access API.
 - Thumbnail extraction is client-side; cached thumbnails are reused before generating missing ones.
 - Cloudflare Pages is static hosting, so it cannot write `.astralplay.db.json` back into your deployed site.
 - If you want the folder JSON database, run AstralPlay locally on your own machine.
