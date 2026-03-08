@@ -115,6 +115,9 @@ function persistLocalDb() {
 function persistDb() {
   persistLocalDb();
   writeFolderDbIfPossible();
+  if (serverRoot) {
+    writeServerDb(localDb);
+  }
 }
 
 async function fetchJson(url, options = {}) {
@@ -507,14 +510,27 @@ function cardsPerPage() {
 
 function seasonProgress(items) {
   let seen = 0;
-  let total = 0;
+  const itemsWithProgress = [];
+
   for (const ep of items) {
     const p = progressOf(ep);
-    if (!p || !p.duration) continue;
-    seen += p.currentTime;
-    total += p.duration;
+    if (p && p.duration) {
+      itemsWithProgress.push(p);
+      seen += p.currentTime;
+    }
   }
-  if (!total) return "0%";
+
+  if (itemsWithProgress.length === 0) {
+    return "0%";
+  }
+
+  const avgDuration = itemsWithProgress.reduce((sum, p) => sum + p.duration, 0) / itemsWithProgress.length;
+  const total = avgDuration * items.length;
+
+  if (!total) {
+    return "0%";
+  }
+
   return `${Math.round((seen / total) * 100)}%`;
 }
 
@@ -808,7 +824,31 @@ async function importServerLibrary(root) {
 
   serverRoot = root;
   rootHandle = null;
-  localDb = db;
+  
+  // Merge server progress into local progress
+  for (const key in db.progress) {
+    if (!localDb.progress[key] || db.progress[key].updatedAt > localDb.progress[key].updatedAt) {
+      localDb.progress[key] = db.progress[key];
+    }
+  }
+
+  // Merge server history into local history
+  const historyMap = new Map();
+  for (const item of localDb.history) {
+    historyMap.set(item.key, item);
+  }
+  for (const item of db.history) {
+    if (!historyMap.has(item.key) || item.at > historyMap.get(item.key).at) {
+      historyMap.set(item.key, item);
+    }
+  }
+  localDb.history = Array.from(historyMap.values()).sort((a, b) => a.at - b.at);
+
+  // Update the rest of the localDb with server data
+  localDb.thumbCache = db.thumbCache;
+  localDb.lastPlayedKey = db.lastPlayedKey;
+  localDb.libraryCache = db.libraryCache;
+
   persistLocalDb();
 
   allEpisodes = flattenServerLibrary(library);
@@ -999,7 +1039,7 @@ function saveCurrentProgress(options = {}) {
   };
   localDb.progress[currentEpisode.key] = progress;
   persistDb();
-  if (serverRoot) {
+  if (serverRoot && options.useBeacon) {
     void writeServerProgress(currentEpisode, progress, options.useBeacon === true);
   }
 }
@@ -1009,6 +1049,7 @@ function queueSave() {
   saveTimer = setTimeout(() => {
     saveTimer = null;
     saveCurrentProgress();
+    persistDb();
     refreshProgressUi();
   }, 1400);
 }
@@ -1307,11 +1348,15 @@ videoEl.addEventListener("play", () => {
 });
 videoEl.addEventListener("ended", async () => {
   saveCurrentProgress();
+  persistDb();
   refreshProgressUi();
   if (autoNext) await playNext();
 });
 
-window.addEventListener("beforeunload", () => saveCurrentProgress({ useBeacon: true }));
+window.addEventListener("beforeunload", () => {
+  saveCurrentProgress({ useBeacon: true });
+  persistDb();
+});
 
 document.addEventListener("keydown", (e) => {
   if (playerModal.classList.contains("hidden")) return;
