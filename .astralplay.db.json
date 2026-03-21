@@ -1,3 +1,13 @@
 {
-  "progress": {}
+  "progress": {},
+  "history": [],
+  "thumbCache": {},
+  "thumbFailures": {},
+  "lastPlayedKey": "",
+  "libraryCache": {
+    "fileCount": 0,
+    "cachedThumbCount": 0,
+    "files": {},
+    "updatedAt": ""
+  }
 }

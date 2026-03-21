@@ -198,6 +198,10 @@ function normalizeDb(data) {
       source.thumbCache && typeof source.thumbCache === "object" && !Array.isArray(source.thumbCache)
         ? source.thumbCache
         : {},
+    thumbFailures:
+      source.thumbFailures && typeof source.thumbFailures === "object" && !Array.isArray(source.thumbFailures)
+        ? source.thumbFailures
+        : {},
     lastPlayedKey: typeof source.lastPlayedKey === "string" ? source.lastPlayedKey : "",
     libraryCache:
       source.libraryCache && typeof source.libraryCache === "object" && !Array.isArray(source.libraryCache)
@@ -667,6 +671,12 @@ const server = http.createServer(async (req, res) => {
           db.thumbCache =
             payload.thumbCache && typeof payload.thumbCache === "object" && !Array.isArray(payload.thumbCache)
               ? payload.thumbCache
+              : {};
+        }
+        if ("thumbFailures" in payload) {
+          db.thumbFailures =
+            payload.thumbFailures && typeof payload.thumbFailures === "object" && !Array.isArray(payload.thumbFailures)
+              ? payload.thumbFailures
               : {};
         }
         if ("lastPlayedKey" in payload) {

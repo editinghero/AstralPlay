@@ -149,6 +149,23 @@ body.player-open .layout {
   gap: 8px;
 }
 
+.row-complete {
+  border: 1px solid var(--line2);
+  background: var(--bg2);
+  color: var(--muted);
+  border-radius: 9px;
+  padding: 8px 11px;
+  cursor: pointer;
+  font-size: 0.85rem;
+  transition: all 0.15s ease;
+}
+
+.row-complete:hover {
+  background: var(--line);
+  color: var(--text);
+  border-color: var(--line2);
+}
+
 .row-toggle,
 .row-arrow,
 .ctrl-btn {

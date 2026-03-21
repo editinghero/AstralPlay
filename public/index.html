@@ -18,6 +18,7 @@
         <button id="navContinue" class="side-btn">Continue</button>
         <button id="navHistory" class="side-btn">History</button>
         <button id="importBtn" class="side-btn primary">Import Media</button>
+        <button id="thumbSettingsBtn" class="side-btn">⚙ Thumbnails</button>
         <input id="folderInput" type="file" webkitdirectory directory multiple hidden />
         <input id="filesInput" type="file" accept="video/*" multiple hidden />
         <input id="singleThumbInput" type="file" accept="image/*" hidden />
@@ -55,6 +56,18 @@
           <button id="modeSingle" class="ctrl-btn large">Use one uploaded image for all</button>
           <button id="modeNone" class="ctrl-btn large">No thumbnails</button>
           <button id="modeGenerate" class="ctrl-btn large">Generate thumbnails</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="thumbSettingsModal" class="dialog hidden">
+      <div class="dialog-card">
+        <h2>Thumbnail Settings</h2>
+        <p id="thumbStatsText">Loading statistics...</p>
+        <div class="dialog-actions">
+          <button id="clearFailuresBtn" class="ctrl-btn large">Clear Failed List & Retry</button>
+          <button id="regenerateAllBtn" class="ctrl-btn large">Delete All & Regenerate</button>
+          <button id="closeThumbSettingsBtn" class="ctrl-btn large">Close</button>
         </div>
       </div>
     </div>

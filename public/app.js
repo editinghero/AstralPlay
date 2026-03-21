@@ -27,6 +27,13 @@ const modeSingleBtn = document.getElementById("modeSingle");
 const modeNoneBtn = document.getElementById("modeNone");
 const modeGenerateBtn = document.getElementById("modeGenerate");
 
+const thumbSettingsModal = document.getElementById("thumbSettingsModal");
+const thumbSettingsBtn = document.getElementById("thumbSettingsBtn");
+const thumbStatsText = document.getElementById("thumbStatsText");
+const clearFailuresBtn = document.getElementById("clearFailuresBtn");
+const regenerateAllBtn = document.getElementById("regenerateAllBtn");
+const closeThumbSettingsBtn = document.getElementById("closeThumbSettingsBtn");
+
 const playerModal = document.getElementById("playerModal");
 const playerBackdrop = document.getElementById("playerBackdrop");
 const closePlayerBtn = document.getElementById("closePlayerBtn");
@@ -81,6 +88,10 @@ function normalizeDb(data) {
     thumbCache:
       source.thumbCache && typeof source.thumbCache === "object" && !Array.isArray(source.thumbCache)
         ? source.thumbCache
+        : {},
+    thumbFailures:
+      source.thumbFailures && typeof source.thumbFailures === "object" && !Array.isArray(source.thumbFailures)
+        ? source.thumbFailures
         : {},
     lastPlayedKey: typeof source.lastPlayedKey === "string" ? source.lastPlayedKey : "",
     libraryCache:
@@ -422,7 +433,11 @@ function askSingleImage() {
   });
 }
 
-async function buildThumb(source) {
+async function buildThumb(source, episodeKey = null) {
+  if (episodeKey && localDb.thumbFailures[episodeKey]) {
+    return "";
+  }
+
   return new Promise((resolve) => {
     const v = document.createElement("video");
     let objectUrl = "";
@@ -442,6 +457,13 @@ async function buildThumb(source) {
     };
     const fail = () => {
       cleanup();
+      if (episodeKey) {
+        localDb.thumbFailures[episodeKey] = {
+          failedAt: new Date().toISOString(),
+          reason: "Failed to generate thumbnail"
+        };
+        persistDb();
+      }
       resolve("");
     };
     v.onerror = fail;
@@ -482,10 +504,24 @@ function visibleListForView() {
     });
   }
   if (activeView === "history") {
-    return [...localDb.history]
-      .reverse()
-      .map((h) => allEpisodes.find((ep) => ep.key === h.key))
-      .filter(Boolean);
+    // Create a map of episode keys to their last played time
+    const historyMap = new Map();
+    localDb.history.forEach((h) => {
+      historyMap.set(h.key, h.at);
+    });
+    
+    // Filter episodes that are in history and add their play time
+    const historyEpisodes = allEpisodes
+      .filter(ep => historyMap.has(ep.key))
+      .map(ep => ({
+        ...ep,
+        lastPlayedAt: historyMap.get(ep.key)
+      }));
+    
+    // Sort by last played time (most recent first)
+    historyEpisodes.sort((a, b) => b.lastPlayedAt - a.lastPlayedAt);
+    
+    return historyEpisodes;
   }
   return [...allEpisodes];
 }
@@ -497,6 +533,16 @@ function groupBySeason(list) {
     if (!map.has(key)) map.set(key, []);
     map.get(key).push(ep);
   }
+  
+  // For history view, sort by most recent episode in each season
+  if (activeView === "history") {
+    return Array.from(map.entries()).sort((a, b) => {
+      const aMaxTime = Math.max(...a[1].map(ep => ep.lastPlayedAt || 0));
+      const bMaxTime = Math.max(...b[1].map(ep => ep.lastPlayedAt || 0));
+      return bMaxTime - aMaxTime;
+    });
+  }
+  
   return Array.from(map.entries()).sort((a, b) => a[0].localeCompare(b[0]));
 }
 
@@ -588,7 +634,12 @@ function renderRows() {
   const groups = groupBySeason(activeList);
   const perPage = cardsPerPage();
   groups.forEach(([title, items]) => {
-    items.sort((a, b) => a.episode - b.episode);
+    // For history view, sort by last played time (most recent first)
+    if (activeView === "history") {
+      items.sort((a, b) => (b.lastPlayedAt || 0) - (a.lastPlayedAt || 0));
+    } else {
+      items.sort((a, b) => a.episode - b.episode);
+    }
     const block = document.createElement("section");
     block.className = "row-block";
 
@@ -602,6 +653,10 @@ function renderRows() {
 
     const right = document.createElement("div");
     right.className = "row-controls";
+    const completeBtn = document.createElement("button");
+    completeBtn.className = "row-complete";
+    completeBtn.textContent = "Complete";
+    completeBtn.title = "Mark entire season as watched";
     const toggle = document.createElement("button");
     toggle.className = "row-toggle";
     toggle.textContent = allRowsCollapsed ? "Show" : "Hide";
@@ -611,7 +666,7 @@ function renderRows() {
     const arrowRight = document.createElement("button");
     arrowRight.className = "row-arrow";
     arrowRight.textContent = ">";
-    right.append(toggle, left, arrowRight);
+    right.append(completeBtn, toggle, left, arrowRight);
     titleWrap.append(h, right);
     header.append(titleWrap);
 
@@ -649,6 +704,83 @@ function renderRows() {
       renderPage();
     });
     renderPage();
+
+    completeBtn.addEventListener("click", async () => {
+      const minEp = Math.min(...items.map(ep => ep.episode));
+      const maxEp = Math.max(...items.map(ep => ep.episode));
+      
+      const rangeModal = document.createElement("div");
+      rangeModal.className = "dialog";
+      rangeModal.innerHTML = `
+        <div class="dialog-card">
+          <h2>Mark Episodes as Watched</h2>
+          <p>Season has episodes ${minEp} to ${maxEp}</p>
+          <div style="margin-bottom: 14px;">
+            <label style="display: block; margin-bottom: 8px; color: var(--muted);">
+              From Episode:
+              <input type="number" id="rangeFrom" min="${minEp}" max="${maxEp}" value="${minEp}" 
+                style="width: 80px; margin-left: 8px; padding: 6px; border-radius: 6px; border: 1px solid var(--line2); background: var(--bg2); color: var(--text);">
+            </label>
+            <label style="display: block; color: var(--muted);">
+              To Episode:
+              <input type="number" id="rangeTo" min="${minEp}" max="${maxEp}" value="${maxEp}" 
+                style="width: 80px; margin-left: 8px; padding: 6px; border-radius: 6px; border: 1px solid var(--line2); background: var(--bg2); color: var(--text);">
+            </label>
+          </div>
+          <div class="dialog-actions">
+            <button id="confirmRange" class="ctrl-btn large">Mark as Watched</button>
+            <button id="cancelRange" class="ctrl-btn large">Cancel</button>
+          </div>
+        </div>
+      `;
+      
+      document.body.appendChild(rangeModal);
+      
+      const fromInput = rangeModal.querySelector("#rangeFrom");
+      const toInput = rangeModal.querySelector("#rangeTo");
+      const confirmBtn = rangeModal.querySelector("#confirmRange");
+      const cancelBtn = rangeModal.querySelector("#cancelRange");
+      
+      const cleanup = () => {
+        rangeModal.remove();
+      };
+      
+      confirmBtn.onclick = () => {
+        const from = Number(fromInput.value);
+        const to = Number(toInput.value);
+        
+        if (from > to) {
+          alert("'From' episode must be less than or equal to 'To' episode");
+          return;
+        }
+        
+        const targetEpisodes = items.filter(ep => ep.episode >= from && ep.episode <= to);
+        const avgDuration = 1500;
+        
+        // Clear progress for ALL episodes in this season first
+        items.forEach((ep) => {
+          delete localDb.progress[ep.key];
+        });
+        
+        // Then set progress only for the selected range
+        targetEpisodes.forEach((ep) => {
+          localDb.progress[ep.key] = {
+            currentTime: avgDuration,
+            duration: avgDuration,
+            speed: 1,
+            volume: 1,
+            updatedAt: new Date().toISOString(),
+          };
+        });
+        
+        persistDb();
+        refreshProgressUi();
+        setStatus(`Marked ${targetEpisodes.length} episodes (E${from}-E${to}) as watched. Cleared progress for other episodes.`);
+        cleanup();
+      };
+      
+      cancelBtn.onclick = cleanup;
+    });
 
     toggle.addEventListener("click", () => {
       const hidden = viewport.classList.toggle("collapsed");
@@ -726,13 +858,19 @@ async function importFileMetas(metas) {
   setStatus(`Loaded cache. Generating ${missingThumbs.length} missing thumbnails...`);
   const batch = 8;
   let index = 0;
+  let failed = 0;
   while (index < missingThumbs.length) {
     const slice = missingThumbs.slice(index, index + batch);
     await Promise.all(
       slice.map(async (ep) => {
-        const t = await buildThumb(ep.file);
-        localDb.thumbCache[ep.key] = t || placeholderThumb(ep);
-        ep.thumbUrl = localDb.thumbCache[ep.key];
+        const t = await buildThumb(ep.file, ep.key);
+        if (t) {
+          localDb.thumbCache[ep.key] = t;
+          ep.thumbUrl = t;
+        } else {
+          failed++;
+          ep.thumbUrl = placeholderThumb(ep);
+        }
       })
     );
     index += slice.length;
@@ -740,10 +878,11 @@ async function importFileMetas(metas) {
       ep.thumbUrl = localDb.thumbCache[ep.key] || ep.thumbUrl || placeholderThumb(ep);
     });
     renderRows();
-    setStatus(`Generated ${index}/${missingThumbs.length} missing thumbnails...`);
+    setStatus(`Generated ${index - failed}/${missingThumbs.length} thumbnails (${failed} failed)...`);
   }
   persistDb();
-  setStatus("Library ready.");
+  const failMsg = failed > 0 ? ` (${failed} failed - unsupported formats skipped)` : "";
+  setStatus(`Library ready${failMsg}.`);
 }
 
 async function processServerThumbnails(mode, singleThumb = "", targetsOverride = null) {
@@ -781,12 +920,16 @@ async function processServerThumbnails(mode, singleThumb = "", targetsOverride =
     const results = await Promise.all(
       slice.map(async (ep) => {
         try {
-          const dataUrl = mode === "single" ? singleThumb : await buildThumb(ep.streamUrl);
+          const dataUrl = mode === "single" ? singleThumb : await buildThumb(ep.streamUrl, ep.key);
           if (!dataUrl) return false;
           await uploadServerThumb(ep, dataUrl);
           return true;
         } catch (error) {
           console.error(`Failed to save thumbnail for ${ep.filename}.`, error);
+          localDb.thumbFailures[ep.key] = {
+            failedAt: new Date().toISOString(),
+            reason: error.message || "Upload failed"
+          };
           return false;
         }
       })
@@ -795,11 +938,14 @@ async function processServerThumbnails(mode, singleThumb = "", targetsOverride =
     saved += results.filter(Boolean).length;
     completed += slice.length;
     renderRows();
-    setStatus(`Saved ${saved}/${total} thumbnails to .astralplay_thumbs...`);
+    const failed = completed - saved;
+    setStatus(`Saved ${saved}/${total} thumbnails (${failed} failed)...`);
   }
 
+  const failed = total - saved;
+  const failMsg = failed > 0 ? ` (${failed} failed - unsupported formats)` : "";
   setStatus(
-    saved ? `Saved ${saved} thumbnails to .astralplay_thumbs.` : "No thumbnails could be generated for this folder.",
+    saved ? `Saved ${saved} thumbnails to .astralplay_thumbs${failMsg}.` : "No thumbnails could be generated for this folder.",
     saved === 0
   );
 
@@ -846,6 +992,7 @@ async function importServerLibrary(root) {
 
   // Update the rest of the localDb with server data
   localDb.thumbCache = db.thumbCache;
+  localDb.thumbFailures = db.thumbFailures || {};
   localDb.lastPlayedKey = db.lastPlayedKey;
   localDb.libraryCache = db.libraryCache;
 
@@ -1256,6 +1403,55 @@ clearHistoryBtn.addEventListener("click", () => {
   }
   renderRows();
   setStatus("History cleared.");
+});
+
+thumbSettingsBtn.addEventListener("click", () => {
+  const failedCount = Object.keys(localDb.thumbFailures || {}).length;
+  const cachedCount = Object.keys(localDb.thumbCache || {}).length;
+  const totalEpisodes = allEpisodes.length;
+  
+  thumbStatsText.innerHTML = `
+    <strong>Thumbnail Statistics:</strong><br>
+    Total Episodes: ${totalEpisodes}<br>
+    Cached Thumbnails: ${cachedCount}<br>
+    Failed Generations: ${failedCount}
+  `;
+  
+  thumbSettingsModal.classList.remove("hidden");
+});
+
+closeThumbSettingsBtn.addEventListener("click", () => {
+  thumbSettingsModal.classList.add("hidden");
+});
+
+clearFailuresBtn.addEventListener("click", async () => {
+  if (!window.confirm("Clear the failed thumbnail list and retry generating them?")) return;
+  
+  thumbSettingsModal.classList.add("hidden");
+  const failedKeys = Object.keys(localDb.thumbFailures || {});
+  localDb.thumbFailures = {};
+  persistDb();
+  
+  if (serverRoot) {
+    await writeServerDb({ thumbFailures: {} });
+  }
+  
+  setStatus(`Cleared ${failedKeys.length} failed thumbnails. Reimport library to regenerate.`);
+});
+
+regenerateAllBtn.addEventListener("click", async () => {
+  if (!window.confirm("Delete ALL thumbnails and regenerate from scratch? This may take a while.")) return;
+  
+  thumbSettingsModal.classList.add("hidden");
+  localDb.thumbCache = {};
+  localDb.thumbFailures = {};
+  persistDb();
+  
+  if (serverRoot) {
+    await writeServerDb({ thumbCache: {}, thumbFailures: {} });
+  }
+  
+  setStatus("All thumbnails cleared. Reimport library to regenerate.");
 });
 
 playerBackdrop.addEventListener("click", () => {
